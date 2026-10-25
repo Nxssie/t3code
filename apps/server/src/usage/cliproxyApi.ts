@@ -29,6 +29,7 @@ import {
   antigravityUserAgent,
 } from "../provider/antigravityUsageLimits.ts";
 import {
+  clampPercent,
   makeUnavailableUsageLimits,
   makeUsageLimits,
 } from "@t3tools/provider-core/server/usageLimits";
@@ -44,6 +45,7 @@ const AuthFile = Schema.Struct({
   auth_index: Schema.String,
   provider: Schema.String,
   email: Schema.optional(Schema.String),
+  label: Schema.optional(Schema.String),
   disabled: Schema.optional(Schema.Boolean),
   project_id: Schema.optional(Schema.String),
   id_token: Schema.optional(
@@ -167,6 +169,35 @@ const decodeConsumeResponse = Schema.decodeUnknownEffect(
     }),
   ),
 );
+
+// Native quota endpoints exposed by CLIProxyAPI for provider plugins
+// (e.g. opencode-go). Unlike the codex/claude OAuth flows above, plugin
+// credentials have no upstream OAuth usage endpoint, so usage comes from
+// `GET quota/providers` (discovery) + `POST quota/fetch` (windows).
+const QuotaProviderEntry = Schema.Struct({
+  plugin_id: Schema.optional(Schema.String),
+  provider: Schema.String,
+  display_name: Schema.optional(Schema.String),
+  supported_providers: Schema.optional(Schema.Array(Schema.String)),
+  supports_reset: Schema.optional(Schema.Boolean),
+});
+const QuotaProviders = Schema.Struct({ providers: Schema.Array(QuotaProviderEntry) });
+const QuotaBucket = Schema.Struct({
+  window: Schema.String,
+  remainingFraction: Schema.Number,
+  resetTime: Schema.optional(Schema.String),
+});
+const QuotaGroup = Schema.Struct({
+  displayName: Schema.optional(Schema.String),
+  buckets: Schema.Array(QuotaBucket),
+});
+const QuotaFetch = Schema.Struct({
+  subscription: Schema.optional(Schema.Struct({ plan: Schema.optional(Schema.String) })),
+  groups: Schema.Array(QuotaGroup),
+});
+
+const decodeQuotaProviders = Schema.decodeUnknownEffect(QuotaProviders);
+const decodeQuotaFetch = Schema.decodeUnknownEffect(QuotaFetch);
 
 const CODEX_BASE = "https://chatgpt.com/backend-api/wham";
 const CREDIT_URL = `${CODEX_BASE}/rate-limit-reset-credits`;
@@ -438,6 +469,21 @@ export const makeCliproxyApi = Effect.gen(function* () {
     return (yield* decodeAuthFiles(response)).files;
   });
 
+  // Best-effort discovery of plugin quota providers. Older hubs answer 404;
+  // callers fall back to the codex/claude-only behavior in that case.
+  const quotaProviders = Effect.fn("CliproxyApi.quotaProviders")(function* (hub: CliproxyHub) {
+    const response = yield* management(hub, "quota/providers");
+    return (yield* decodeQuotaProviders(response)).providers;
+  });
+
+  const quotaFetch = Effect.fn("CliproxyApi.quotaFetch")(function* (
+    hub: CliproxyHub,
+    auth_index: string,
+  ) {
+    const response = yield* management(hub, "quota/fetch", { auth_index });
+    return yield* decodeQuotaFetch(response);
+  });
+
   const apiCall = Effect.fn("CliproxyApi.apiCall")(function* (
     hub: CliproxyHub,
     account: AuthFile,
@@ -483,6 +529,91 @@ export const makeCliproxyApi = Effect.gen(function* () {
     return { id: account.id, driver: provider.driver, ...reading };
   });
 
+  // Usage for plugin-registered credentials (e.g. opencode-go). These have
+  // no upstream OAuth usage endpoint, so windows come from the hub's native
+  // quota API: rolling -> session, weekly -> weekly, monthly -> monthly.
+  const readPluginAccount = Effect.fn("CliproxyApi.readPluginAccount")(function* (
+    hub: CliproxyHub,
+    account: AuthFile,
+    quotaEntry: typeof QuotaProviderEntry.Type | undefined,
+  ): Effect.fn.Return<UsageLimitSourceAccount, UsageLimitSourceError> {
+    const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const displayName = quotaEntry?.display_name ?? account.provider;
+    const basePlan = [account.label, displayName]
+      .filter((part) => part !== undefined && part.trim().length > 0)
+      .join(" · ");
+    const base = {
+      id: account.id,
+      driver: ProviderDriverKind.make(
+        account.provider.includes("opencode") ? "opencode" : "claudeAgent",
+      ),
+      ...(account.email ? { email: account.email } : {}),
+    };
+    const read = Effect.gen(function* () {
+      const quota = yield* quotaFetch(hub, account.auth_index);
+      const subscriptionPlan = quota.subscription?.plan?.trim();
+      const planSuffix =
+        subscriptionPlan && !displayName.toLowerCase().endsWith(subscriptionPlan.toLowerCase())
+          ? ` ${subscriptionPlan}`
+          : "";
+      const plan = `${basePlan}${planSuffix}`;
+      const windows = quota.groups.flatMap((group) =>
+        group.buckets.flatMap((bucket) => {
+          const kind =
+            bucket.window === "rolling"
+              ? ("session" as const)
+              : bucket.window === "weekly"
+                ? ("weekly" as const)
+                : bucket.window === "monthly"
+                  ? ("monthly" as const)
+                  : undefined;
+          if (kind === undefined) return [];
+          const resetsAt =
+            bucket.resetTime !== undefined && !Number.isNaN(Date.parse(bucket.resetTime))
+              ? bucket.resetTime
+              : undefined;
+          return [
+            {
+              id: bucket.window,
+              kind,
+              label: bucket.window[0]!.toUpperCase() + bucket.window.slice(1),
+              usedPercent: clampPercent((1 - bucket.remainingFraction) * 100),
+              ...(resetsAt === undefined ? {} : { resetsAt }),
+            },
+          ];
+        }),
+      );
+      return {
+        ...base,
+        ...(plan.trim().length > 0 ? { plan } : {}),
+        usageLimits: {
+          ...makeUsageLimits({ checkedAt, windows }),
+          ...(subscriptionPlan
+            ? {
+                credentialFingerprint: yield* digest
+                  .digest(
+                    Digest.sha256,
+                    new TextEncoder().encode(`cliproxy\0${account.provider}\0${account.id}`),
+                  )
+                  .pipe(Effect.map(Hex.encode), Effect.orDie),
+              }
+            : {}),
+        },
+      };
+    });
+    return yield* read.pipe(
+      Effect.orElseSucceed(() => ({
+        ...base,
+        ...(basePlan.trim().length > 0 ? { plan: basePlan } : {}),
+        usageLimits: makeUnavailableUsageLimits({
+          checkedAt,
+          reason: "probeFailed",
+          message: "The hub could not read this account's usage.",
+        }),
+      })),
+    );
+  });
+
   const readAccounts = Effect.fn("CliproxyApi.readAccounts")(function* (
     hub: CliproxyHub,
   ): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
@@ -493,12 +624,33 @@ export const makeCliproxyApi = Effect.gen(function* () {
           : new UsageLimitSourceError({ detail: "The hub could not list accounts." }),
       ),
     );
+    // Plugin quota providers (opencode-go, ...) are optional: older hubs 404. Only ask
+    // when an enabled account belongs to a provider the built-in table does not know.
+    const needsQuota = accounts.some(
+      (account) => !account.disabled && !HUB_PROVIDERS.has(account.provider),
+    );
+    const quota: ReadonlyArray<typeof QuotaProviderEntry.Type> = needsQuota
+      ? yield* quotaProviders(hub).pipe(Effect.orElseSucceed(() => []))
+      : [];
+    const quotaByProvider = new Map(
+      quota.flatMap((entry) =>
+        [entry.provider, ...(entry.supported_providers ?? [])].map(
+          (provider) => [provider, entry] as const,
+        ),
+      ),
+    );
     return yield* Effect.forEach(
-      accounts.flatMap((account) => {
+      accounts.filter(
+        (account) =>
+          !account.disabled &&
+          (HUB_PROVIDERS.has(account.provider) || quotaByProvider.has(account.provider)),
+      ),
+      (account) => {
         const provider = HUB_PROVIDERS.get(account.provider);
-        return provider && !account.disabled ? [{ account, provider }] : [];
-      }),
-      ({ account, provider }) => readAccount(hub, account, provider),
+        return provider
+          ? readAccount(hub, account, provider)
+          : readPluginAccount(hub, account, quotaByProvider.get(account.provider));
+      },
       { concurrency: 4 },
     );
   });
