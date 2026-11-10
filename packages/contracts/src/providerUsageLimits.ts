@@ -77,12 +77,27 @@ export const UsageLimitSourceAccount = Schema.Struct({
 });
 export type UsageLimitSourceAccount = typeof UsageLimitSourceAccount.Type;
 
+/** Inline image only, so clients never fetch a hub-supplied URL. */
+export const UsageLimitSourceProviderIcon = Schema.String.check(
+  Schema.isMaxLength(8192),
+  Schema.isPattern(/^data:image\/(?:svg\+xml|png)[;,]/),
+);
+export const isUsageLimitSourceProviderIcon = Schema.is(UsageLimitSourceProviderIcon);
+
+/** How a source names a driver T3 Code has no built-in label or logo for. */
+export const UsageLimitSourceProvider = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  icon: Schema.optional(UsageLimitSourceProviderIcon),
+});
+export type UsageLimitSourceProvider = typeof UsageLimitSourceProvider.Type;
+
 export const UsageLimitSourceSnapshot = Schema.Struct({
   id: UsageLimitSourceId,
   kind: Schema.Literal("cliproxy"),
   label: TrimmedNonEmptyString,
   checkedAt: IsoDateTime,
   accounts: ForwardCompatibleArray(UsageLimitSourceAccount),
+  providers: Schema.optional(Schema.Record(ProviderDriverKind, UsageLimitSourceProvider)),
   error: Schema.optional(TrimmedNonEmptyString),
 });
 export type UsageLimitSourceSnapshot = typeof UsageLimitSourceSnapshot.Type;

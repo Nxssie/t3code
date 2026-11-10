@@ -92,6 +92,8 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   accentColor?: string | undefined;
   acpRegistryAgentId?: string | undefined;
   acpRegistryIconUrl?: string | undefined;
+  /** Inline image for drivers without a bundled logo, e.g. a usage hub's provider icon. */
+  iconUrl?: string | undefined;
   showBadge?: boolean;
   badgeContent?: "initials" | "none";
   size?: "default" | "compact";
@@ -167,6 +169,13 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
         />
       ) : Icon ? (
         <Icon className={cn("size-5 shrink-0", iconClassName)} aria-hidden />
+      ) : props.iconUrl ? (
+        <img
+          src={props.iconUrl}
+          alt=""
+          className={cn("size-5 shrink-0 object-contain", iconClassName)}
+          aria-hidden
+        />
       ) : (
         <span className={cn("text-3xs font-semibold leading-none", iconClassName)}>
           {providerInstanceInitials(props.displayName)}

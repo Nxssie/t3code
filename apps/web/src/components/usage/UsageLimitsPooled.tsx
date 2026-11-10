@@ -84,8 +84,10 @@ function AccountAvatar({
         displayName={
           account.displayName ??
           providerClients.get(account.driver)?.label ??
+          account.providerName ??
           String(account.driver)
         }
+        iconUrl={account.providerIcon}
         accentColor={account.accentColor}
         showBadge={Boolean(account.displayName)}
         indicatorBackground="var(--popover)"
@@ -114,7 +116,7 @@ function AccountName({
   }
   return (
     <span className={className}>
-      {providerClients.get(account.driver)?.label ?? String(account.driver)}
+      {providerClients.get(account.driver)?.label ?? account.providerName ?? String(account.driver)}
     </span>
   );
 }
@@ -161,7 +163,10 @@ function SegmentPopover({
         <span className="flex items-center gap-2 text-sm font-medium text-foreground">
           <AccountAvatar account={account} />
           <span className="truncate">
-            {account.displayName ?? providerClients.get(account.driver)?.label ?? account.driver}
+            {account.displayName ??
+              providerClients.get(account.driver)?.label ??
+              account.providerName ??
+              account.driver}
           </span>
         </span>
         {account.email ? (
@@ -361,7 +366,7 @@ function SegmentTriggers({
             ref={segmentRef}
             type="button"
             style={{ gridColumn: index, gridRow: 1, ...paceMark?.gappedTrack }}
-            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${resetsIn ? `, ${resetsIn}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
+            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : (account.providerName ?? account.driver))}: ${remaining}% left${resetsIn ? `, ${resetsIn}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
             className="relative h-5 min-w-0 cursor-pointer rounded-md bg-muted text-start outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background data-[popup-open]:ring-1 data-[popup-open]:ring-inset data-[popup-open]:ring-border @2xl/pool:h-8"
           />
         }
@@ -573,7 +578,7 @@ function PoolWindowCard({
 
 function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: number }) {
   const color = barColor(pool.driver);
-  const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
+  const label = providerClients.get(pool.driver)?.label ?? pool.providerName ?? String(pool.driver);
   const windows = displayLimitWindows(pool);
   return (
     <section className="flex flex-col gap-3">
@@ -581,6 +586,7 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
         <ProviderInstanceIcon
           driverKind={pool.driver}
           displayName={label}
+          iconUrl={pool.providerIcon}
           indicatorBackground="var(--background)"
           className="size-5"
           iconClassName="size-4 text-foreground/80"
