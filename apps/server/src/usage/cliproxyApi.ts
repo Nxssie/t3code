@@ -1,5 +1,6 @@
 import {
   isProviderDriverKind,
+  isUsageLimitSourceProviderColor,
   isUsageLimitSourceProviderIcon,
   ProviderDriverKind,
   UsageLimitSourceError,
@@ -183,6 +184,7 @@ const QuotaProviderEntry = Schema.Struct({
   provider: Schema.String,
   display_name: Schema.optional(Schema.String),
   icon: Schema.optional(Schema.String),
+  color: Schema.optional(Schema.String),
   supported_providers: Schema.optional(Schema.Array(Schema.String)),
   supports_reset: Schema.optional(Schema.Boolean),
 });
@@ -671,6 +673,9 @@ export const makeCliproxyApi = Effect.gen(function* () {
         name: entry.display_name?.trim() || account.provider,
         ...(entry.icon !== undefined && isUsageLimitSourceProviderIcon(entry.icon)
           ? { icon: entry.icon }
+          : {}),
+        ...(entry.color !== undefined && isUsageLimitSourceProviderColor(entry.color)
+          ? { color: entry.color }
           : {}),
       };
     }

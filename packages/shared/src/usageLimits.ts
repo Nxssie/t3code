@@ -245,6 +245,7 @@ export interface LimitAccount {
   /** Hub-supplied name and inline icon for drivers without built-in branding. */
   readonly providerName?: string | undefined;
   readonly providerIcon?: string | undefined;
+  readonly providerColor?: string | undefined;
   readonly environments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly label: string;
@@ -319,6 +320,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
       accentColor: previous.accentColor ?? next.accentColor,
       providerName: previous.providerName ?? next.providerName,
       providerIcon: previous.providerIcon ?? next.providerIcon,
+      providerColor: previous.providerColor ?? next.providerColor,
       environments,
       sourceLabel: environments.length > 0 ? null : (previous.sourceLabel ?? next.sourceLabel),
       redeem:
@@ -377,6 +379,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           accentColor: undefined,
           providerName: provider?.name,
           providerIcon: provider?.icon,
+          providerColor: provider?.color,
           environments: [],
           sourceLabel,
           redeem: account.usageLimits.resetCredits?.nextCreditId
@@ -448,6 +451,7 @@ export interface LimitPool {
   readonly driver: ServerProvider["driver"];
   readonly providerName: string | undefined;
   readonly providerIcon: string | undefined;
+  readonly providerColor: string | undefined;
   readonly accounts: readonly LimitAccount[];
   readonly windows: readonly LimitPoolWindow[];
 }
@@ -512,6 +516,7 @@ export function collectLimitPools(
       driver,
       providerName: members.find((account) => account.providerName)?.providerName,
       providerIcon: members.find((account) => account.providerIcon)?.providerIcon,
+      providerColor: members.find((account) => account.providerColor)?.providerColor,
       accounts: sorted,
       windows: poolWindows(sorted, now),
     };

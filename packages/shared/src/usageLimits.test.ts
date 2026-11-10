@@ -816,7 +816,7 @@ describe("pools", () => {
                 usageLimitSources: [
                   {
                     ...source,
-                    providers: { [nan]: { name: "NaN", icon } },
+                    providers: { [nan]: { name: "NaN", icon, color: "#7D39EB" } },
                     accounts: [
                       {
                         id: "nan.json",
@@ -833,8 +833,17 @@ describe("pools", () => {
       ),
       now,
     );
-    expect(pool).toMatchObject({ driver: "nan", providerName: "NaN", providerIcon: icon });
-    expect(pool?.accounts[0]).toMatchObject({ providerName: "NaN", providerIcon: icon });
+    expect(pool).toMatchObject({
+      driver: "nan",
+      providerName: "NaN",
+      providerIcon: icon,
+      providerColor: "#7D39EB",
+    });
+    expect(pool?.accounts[0]).toMatchObject({
+      providerName: "NaN",
+      providerIcon: icon,
+      providerColor: "#7D39EB",
+    });
   });
 
   it("pools windows by id across accounts and orders resets by when they land", () => {

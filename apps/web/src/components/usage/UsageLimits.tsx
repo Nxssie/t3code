@@ -48,11 +48,15 @@ const PACE: Record<LimitPace, { readonly label: string; readonly icon: typeof Ga
   under: { label: "Under pace: headroom left for the rest of the window", icon: TrendingDownIcon },
 };
 
-export function barColor(driver: ServerProvider["driver"]): string {
+export function barColor(
+  driver: ServerProvider["driver"],
+  providerColor?: string | undefined,
+): string {
   const presentation = Object.values(PROVIDER_PRESENTATION).find(
     (entry) => entry.driverKind === driver,
   );
-  return presentation?.color ?? "var(--foreground)";
+  // Built-in drivers keep their colour; a hub's colour only fills in for drivers without one.
+  return presentation?.color ?? normalizeProviderAccentColor(providerColor) ?? "var(--foreground)";
 }
 
 export function PaceIcon({ pace }: { readonly pace: LimitPace }) {

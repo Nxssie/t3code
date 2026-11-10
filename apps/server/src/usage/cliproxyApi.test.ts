@@ -66,6 +66,7 @@ function fixture(
       provider: string;
       display_name?: string;
       icon?: string;
+      color?: string;
       supported_providers?: Array<string>;
     }>;
     quotaFetch?: (auth_index: string) => { status: number; body: unknown };
@@ -806,7 +807,7 @@ describe("CLIProxyAPI plugin quota providers", () => {
     }),
   );
 
-  it.effect("names plugin drivers by slug with their own windows and inline icons", () =>
+  it.effect("names plugin drivers by slug with their own windows, inline icons and colours", () =>
     Effect.gen(function* () {
       const png = "data:image/png;base64,iVBORw0KGgo=";
       const test = fixture({
@@ -817,9 +818,14 @@ describe("CLIProxyAPI plugin quota providers", () => {
           { id: "dotted.json", auth_index: "d", provider: "has.dot" },
         ],
         quotaProviders: [
-          { provider: "nan", display_name: " NaN ", icon: png },
-          { provider: "remote", icon: "https://hub.test/icon.png" },
-          { provider: "huge", display_name: "Huge", icon: `${png}${"A".repeat(8192)}` },
+          { provider: "nan", display_name: " NaN ", icon: png, color: "#7d39EB" },
+          { provider: "remote", icon: "https://hub.test/icon.png", color: "red" },
+          {
+            provider: "huge",
+            display_name: "Huge",
+            icon: `${png}${"A".repeat(8192)}`,
+            color: "#7D39EB; background: url(x)",
+          },
           { provider: "has.dot", display_name: "Dotted" },
         ],
         quotaFetch: () => ({
@@ -852,7 +858,7 @@ describe("CLIProxyAPI plugin quota providers", () => {
         },
       ]);
       expect(providers).toEqual({
-        nan: { name: "NaN", icon: png },
+        nan: { name: "NaN", icon: png, color: "#7d39EB" },
         remote: { name: "remote" },
         huge: { name: "Huge" },
       });
