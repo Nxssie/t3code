@@ -801,6 +801,42 @@ describe("pools", () => {
     ).toEqual(["weekly", "weekly:secondary"]);
   });
 
+  it("names a hub-only driver's pool and accounts from the source's provider entry", () => {
+    const nan = ProviderDriverKind.make("nan");
+    const icon = "data:image/png;base64,iVBORw0KGgo=";
+    const [pool] = collectLimitPools(
+      collectLimitAccounts(
+        new Map([
+          [
+            EnvironmentId.make("env-a"),
+            {
+              ...laptop,
+              serverConfig: {
+                providers: [],
+                usageLimitSources: [
+                  {
+                    ...source,
+                    providers: { [nan]: { name: "NaN", icon } },
+                    accounts: [
+                      {
+                        id: "nan.json",
+                        driver: nan,
+                        usageLimits: { checkedAt, windows: [{ ...weekly, usedPercent: 40 }] },
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        ]),
+      ),
+      now,
+    );
+    expect(pool).toMatchObject({ driver: "nan", providerName: "NaN", providerIcon: icon });
+    expect(pool?.accounts[0]).toMatchObject({ providerName: "NaN", providerIcon: icon });
+  });
+
   it("pools windows by id across accounts and orders resets by when they land", () => {
     const input = new Map([
       [

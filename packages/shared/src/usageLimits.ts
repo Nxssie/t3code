@@ -242,6 +242,9 @@ export interface LimitAccount {
   readonly email: string | undefined;
   readonly plan: string | undefined;
   readonly accentColor: string | undefined;
+  /** Hub-supplied name and inline icon for drivers without built-in branding. */
+  readonly providerName?: string | undefined;
+  readonly providerIcon?: string | undefined;
   readonly environments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly label: string;
@@ -314,6 +317,8 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           : displayName,
       plan: planSources.get(key)?.plan ?? previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
+      providerName: previous.providerName ?? next.providerName,
+      providerIcon: previous.providerIcon ?? next.providerIcon,
       environments,
       sourceLabel: environments.length > 0 ? null : (previous.sourceLabel ?? next.sourceLabel),
       redeem:
@@ -361,6 +366,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         : source.label;
       for (const account of source.accounts) {
         if (limitsNotice(account.usageLimits) !== null) continue;
+        const provider = source.providers?.[account.driver];
         const key = `${source.id}:${account.id}${account.workspaceId ? `:${account.workspaceId}` : ""}`;
         merge(resolveKey(account) ?? key, {
           key,
@@ -369,6 +375,8 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           email: account.email,
           plan: account.plan,
           accentColor: undefined,
+          providerName: provider?.name,
+          providerIcon: provider?.icon,
           environments: [],
           sourceLabel,
           redeem: account.usageLimits.resetCredits?.nextCreditId
@@ -438,6 +446,8 @@ export interface LimitPoolWindow {
 
 export interface LimitPool {
   readonly driver: ServerProvider["driver"];
+  readonly providerName: string | undefined;
+  readonly providerIcon: string | undefined;
   readonly accounts: readonly LimitAccount[];
   readonly windows: readonly LimitPoolWindow[];
 }
@@ -498,7 +508,13 @@ export function collectLimitPools(
         accountSortName(left).localeCompare(accountSortName(right)) ||
         left.key.localeCompare(right.key),
     );
-    return { driver, accounts: sorted, windows: poolWindows(sorted, now) };
+    return {
+      driver,
+      providerName: members.find((account) => account.providerName)?.providerName,
+      providerIcon: members.find((account) => account.providerIcon)?.providerIcon,
+      accounts: sorted,
+      windows: poolWindows(sorted, now),
+    };
   });
 }
 

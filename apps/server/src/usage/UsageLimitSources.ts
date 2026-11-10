@@ -84,14 +84,12 @@ export const make = Effect.gen(function* () {
     if (managementKey.length === 0) {
       return { ...base, accounts: [], error: missingManagementKey(config) };
     }
-    const accounts = yield* api
-      .readAccounts({ url: config.url, managementKey })
-      .pipe(Effect.result);
-    if (accounts._tag === "Failure") {
-      yield* Effect.logDebug("usage limit source read failed", { id, cause: accounts.failure });
-      return { ...base, accounts: [], error: accounts.failure.detail };
+    const reading = yield* api.readAccounts({ url: config.url, managementKey }).pipe(Effect.result);
+    if (reading._tag === "Failure") {
+      yield* Effect.logDebug("usage limit source read failed", { id, cause: reading.failure });
+      return { ...base, accounts: [], error: reading.failure.detail };
     }
-    return { ...base, accounts: accounts.success };
+    return { ...base, ...reading.success };
   });
 
   const publish = Effect.fn("UsageLimitSources.publish")(function* (

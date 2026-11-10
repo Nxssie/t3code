@@ -1,9 +1,13 @@
 import {
+  isProviderDriverKind,
+  isUsageLimitSourceProviderIcon,
   ProviderDriverKind,
   UsageLimitSourceError,
   type ProviderConsumeResetCreditResult,
+  type ServerProviderUsageWindow,
   type UsageLimitSourceAccount,
   type UsageLimitSourceConfig,
+  type UsageLimitSourceProvider,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
@@ -178,6 +182,7 @@ const QuotaProviderEntry = Schema.Struct({
   plugin_id: Schema.optional(Schema.String),
   provider: Schema.String,
   display_name: Schema.optional(Schema.String),
+  icon: Schema.optional(Schema.String),
   supported_providers: Schema.optional(Schema.Array(Schema.String)),
   supports_reset: Schema.optional(Schema.Boolean),
 });
@@ -186,6 +191,8 @@ const QuotaBucket = Schema.Struct({
   window: Schema.String,
   remainingFraction: Schema.Number,
   resetTime: Schema.optional(Schema.String),
+  label: Schema.optional(Schema.String),
+  windowSeconds: Schema.optional(Schema.Number),
 });
 const QuotaGroup = Schema.Struct({
   displayName: Schema.optional(Schema.String),
@@ -197,6 +204,13 @@ const QuotaFetch = Schema.Struct({
 });
 
 const decodeQuotaProviders = Schema.decodeUnknownEffect(QuotaProviders);
+const QUOTA_WINDOW_KINDS: Partial<Record<string, ServerProviderUsageWindow["kind"]>> = {
+  rolling: "session",
+  weekly: "weekly",
+  monthly: "monthly",
+};
+// opencode-go and friends share the built-in OpenCode driver; other plugins keep their slug.
+const pluginDriver = (provider: string) => (provider.includes("opencode") ? "opencode" : provider);
 const decodeQuotaFetch = Schema.decodeUnknownEffect(QuotaFetch);
 
 const CODEX_BASE = "https://chatgpt.com/backend-api/wham";
@@ -531,7 +545,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
 
   // Usage for plugin-registered credentials (e.g. opencode-go). These have
   // no upstream OAuth usage endpoint, so windows come from the hub's native
-  // quota API: rolling -> session, weekly -> weekly, monthly -> monthly.
+  // quota API: rolling -> session, weekly -> weekly, monthly -> monthly, else other.
   const readPluginAccount = Effect.fn("CliproxyApi.readPluginAccount")(function* (
     hub: CliproxyHub,
     account: AuthFile,
@@ -544,9 +558,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
       .join(" · ");
     const base = {
       id: account.id,
-      driver: ProviderDriverKind.make(
-        account.provider.includes("opencode") ? "opencode" : "claudeAgent",
-      ),
+      driver: ProviderDriverKind.make(pluginDriver(account.provider)),
       ...(account.email ? { email: account.email } : {}),
     };
     const read = Effect.gen(function* () {
@@ -559,26 +571,24 @@ export const makeCliproxyApi = Effect.gen(function* () {
       const plan = `${basePlan}${planSuffix}`;
       const windows = quota.groups.flatMap((group) =>
         group.buckets.flatMap((bucket) => {
-          const kind =
-            bucket.window === "rolling"
-              ? ("session" as const)
-              : bucket.window === "weekly"
-                ? ("weekly" as const)
-                : bucket.window === "monthly"
-                  ? ("monthly" as const)
-                  : undefined;
-          if (kind === undefined) return [];
+          const id = bucket.window.trim();
+          if (id.length === 0) return [];
           const resetsAt =
             bucket.resetTime !== undefined && !Number.isNaN(Date.parse(bucket.resetTime))
               ? bucket.resetTime
               : undefined;
+          const windowDurationMins =
+            bucket.windowSeconds !== undefined && bucket.windowSeconds > 0
+              ? Math.round(bucket.windowSeconds / 60)
+              : undefined;
           return [
             {
-              id: bucket.window,
-              kind,
-              label: bucket.window[0]!.toUpperCase() + bucket.window.slice(1),
+              id,
+              kind: QUOTA_WINDOW_KINDS[id] ?? "other",
+              label: bucket.label?.trim() || id[0]!.toUpperCase() + id.slice(1),
               usedPercent: clampPercent((1 - bucket.remainingFraction) * 100),
               ...(resetsAt === undefined ? {} : { resetsAt }),
+              ...(windowDurationMins === undefined ? {} : { windowDurationMins }),
             },
           ];
         }),
@@ -616,7 +626,13 @@ export const makeCliproxyApi = Effect.gen(function* () {
 
   const readAccounts = Effect.fn("CliproxyApi.readAccounts")(function* (
     hub: CliproxyHub,
-  ): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
+  ): Effect.fn.Return<
+    {
+      readonly accounts: ReadonlyArray<UsageLimitSourceAccount>;
+      readonly providers?: Record<ProviderDriverKind, UsageLimitSourceProvider>;
+    },
+    UsageLimitSourceError
+  > {
     const accounts = yield* authFiles(hub).pipe(
       Effect.mapError((error) =>
         isUsageLimitSourceError(error)
@@ -639,12 +655,27 @@ export const makeCliproxyApi = Effect.gen(function* () {
         ),
       ),
     );
-    return yield* Effect.forEach(
-      accounts.filter(
-        (account) =>
-          !account.disabled &&
-          (HUB_PROVIDERS.has(account.provider) || quotaByProvider.has(account.provider)),
-      ),
+    const readable = accounts.filter(
+      (account) =>
+        !account.disabled &&
+        (HUB_PROVIDERS.has(account.provider) ||
+          (quotaByProvider.has(account.provider) &&
+            isProviderDriverKind(pluginDriver(account.provider)))),
+    );
+    const providers: Record<ProviderDriverKind, UsageLimitSourceProvider> = {};
+    for (const account of readable) {
+      const entry = quotaByProvider.get(account.provider);
+      const driver = ProviderDriverKind.make(pluginDriver(account.provider));
+      if (!entry || HUB_PROVIDERS.has(account.provider) || providers[driver]) continue;
+      providers[driver] = {
+        name: entry.display_name?.trim() || account.provider,
+        ...(entry.icon !== undefined && isUsageLimitSourceProviderIcon(entry.icon)
+          ? { icon: entry.icon }
+          : {}),
+      };
+    }
+    const read = yield* Effect.forEach(
+      readable,
       (account) => {
         const provider = HUB_PROVIDERS.get(account.provider);
         return provider
@@ -653,6 +684,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
       },
       { concurrency: 4 },
     );
+    return { accounts: read, ...(Object.keys(providers).length > 0 ? { providers } : {}) };
   });
 
   const consume = Effect.fn("CliproxyApi.consume")(function* (
