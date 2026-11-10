@@ -84,10 +84,17 @@ export const UsageLimitSourceProviderIcon = Schema.String.check(
 );
 export const isUsageLimitSourceProviderIcon = Schema.is(UsageLimitSourceProviderIcon);
 
+/** Brand colour as `#RRGGBB`, so clients never inject arbitrary CSS. */
+export const UsageLimitSourceProviderColor = Schema.String.check(
+  Schema.isPattern(/^#[0-9a-fA-F]{6}$/),
+);
+export const isUsageLimitSourceProviderColor = Schema.is(UsageLimitSourceProviderColor);
+
 /** How a source names a driver T3 Code has no built-in label or logo for. */
 export const UsageLimitSourceProvider = Schema.Struct({
   name: TrimmedNonEmptyString,
   icon: Schema.optional(UsageLimitSourceProviderIcon),
+  color: Schema.optional(UsageLimitSourceProviderColor),
 });
 export type UsageLimitSourceProvider = typeof UsageLimitSourceProvider.Type;
 

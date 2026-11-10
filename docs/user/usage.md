@@ -182,7 +182,7 @@ No hub plugin is required for these.
 
 Accounts of other providers appear when a hub plugin reports their quota. They show under the name
 and icon the plugin gives, with the windows it reports; accounts of providers without a plugin are
-not read.
+not read. A plugin may also give a brand colour (`#RRGGBB`) for the provider's bars.
 
 This connection supplies usage information; configure
 the provider separately to send agent requests through the hub. Remove the hub from the same
