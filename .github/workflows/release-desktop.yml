@@ -110,6 +110,12 @@ on:
       relay_url:
         required: true
         type: string
+      # A git bundle artifact from this run to check `ref` out of instead of
+      # this repository. Fork releases build a rebased tree that is never pushed.
+      source_artifact:
+        required: false
+        default: ""
+        type: string
 
 # electron-builder leaves the default arch (x64) out of the unpacked app's
 # directory name.
@@ -140,16 +146,28 @@ jobs:
       # checkout.workers=0 writes the files on every core. Alternating both ways
       # in one job on the Windows runners, it wrote the files about 10s faster
       # (about 40% on arm64).
+      - name: Download source bundle
+        if: inputs.source_artifact != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.source_artifact }}
+          path: ${{ runner.temp }}/source-bundle
+
       - name: Checkout
         shell: bash
         env:
           CHECKOUT_REF: ${{ inputs.ref }}
+          SOURCE_ARTIFACT: ${{ inputs.source_artifact }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           git init .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          if [[ -n "$SOURCE_ARTIFACT" ]]; then
+            git fetch --no-tags "$RUNNER_TEMP/source-bundle/source.bundle" "$CHECKOUT_REF"
+          else
+            git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          fi
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach FETCH_HEAD
 

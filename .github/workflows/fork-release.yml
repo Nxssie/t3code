@@ -1,0 +1,493 @@
+# Fork release: reapplies this fork's commits on the newest upstream stable
+# release, builds the Linux x64 CLI archive and the Windows x64 installer, and
+# publishes them as this repository's latest release, which the installed
+# desktop app follows for updates and its WSL runtime downloads.
+#
+# The fork commits are the ones on the workflow's branch (fork-patches) that
+# upstream main lacks. They are rebased onto the upstream tag in this run's
+# workspace only. The rebased tree is never pushed: GITHUB_TOKEN cannot push
+# commits that add workflow files, so the build jobs check it out of a git
+# bundle artifact instead. The release tag points at the commit this run
+# started from; the release notes name the upstream tag and the rebased commit.
+#
+# Fork versions are `<upstream version>-nan.<fork revision>`. They read as
+# Stable builds to T3 (cliReleaseChannelOf) and electron-updater offers them
+# as long as each is semver-greater than the installed one.
+name: Fork release
+
+on:
+  schedule:
+    # Every six hours, off minute zero when GitHub scheduled jobs are busiest.
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream stable tag to rebase onto (for example v0.1.9). Defaults to pingdotgg/t3code's latest release."
+        required: false
+        default: ""
+        type: string
+      fork_revision:
+        description: "Fork revision N in <version>-nan.N"
+        required: false
+        default: "1"
+        type: string
+      build_branch_head:
+        description: "Build the branch head as-is, without rebasing onto an upstream tag (needs version)"
+        required: false
+        default: false
+        type: boolean
+      version:
+        description: "Release version for build_branch_head, for example 0.1.9-nan.0"
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: pingdotgg/t3code
+
+jobs:
+  prepare:
+    name: Prepare fork source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      skip: ${{ steps.resolve.outputs.skip }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      clerk_publishable_key: ${{ steps.public_config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.public_config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.public_config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.public_config.outputs.relay_url }}
+    steps:
+      - id: resolve
+        name: Resolve release version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          INPUT_FORK_REVISION: ${{ inputs.fork_revision }}
+          INPUT_BUILD_BRANCH_HEAD: ${{ inputs.build_branch_head }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$INPUT_BUILD_BRANCH_HEAD" == "true" ]]; then
+            version="${INPUT_VERSION#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-nan\.[0-9]+$ ]]; then
+              echo "build_branch_head needs a version like 0.1.9-nan.0, got '$INPUT_VERSION'." >&2
+              exit 1
+            fi
+            upstream_tag=""
+          else
+            upstream_tag="${INPUT_UPSTREAM_TAG:-}"
+            if [[ -z "$upstream_tag" ]]; then
+              upstream_tag="$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq .tag_name)"
+            fi
+            if [[ ! "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Upstream tag '$upstream_tag' is not a stable vX.Y.Z release." >&2
+              exit 1
+            fi
+            revision="${INPUT_FORK_REVISION:-1}"
+            if [[ ! "$revision" =~ ^[0-9]+$ ]]; then
+              echo "fork_revision must be a non-negative integer, got '$revision'." >&2
+              exit 1
+            fi
+            version="${upstream_tag#v}-nan.$revision"
+          fi
+
+          tag="v$version"
+          # A draft left by a failed publish does not count; publish replaces it.
+          is_draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+          if [[ "$is_draft" == "false" ]]; then
+            echo "Release $tag already exists on $GITHUB_REPOSITORY; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            skip=true
+          else
+            skip=false
+          fi
+
+          {
+            echo "skip=$skip"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "upstream_tag=$upstream_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Configure Git identity
+        if: steps.resolve.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # The fork commits are those on this branch that upstream main lacks, so
+      # moving fork-patches onto a newer upstream main keeps the set unchanged.
+      - id: rebase
+        name: Rebase fork commits onto the upstream tag
+        if: steps.resolve.outputs.skip != 'true' && steps.resolve.outputs.upstream_tag != ''
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.resolve.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/$UPSTREAM_REPOSITORY.git"
+          git fetch --no-tags upstream main "+refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
+
+          base="$(git merge-base upstream/main HEAD)"
+          mapfile -t commits < <(git rev-list --reverse "$base..HEAD")
+          if [[ ${#commits[@]} -eq 0 ]]; then
+            echo "No fork commits found between upstream main and $(git rev-parse HEAD)." >&2
+            exit 1
+          fi
+          if [[ -n "$(git rev-list --merges "$base..HEAD")" ]]; then
+            echo "Fork commits must be linear; $GITHUB_REF_NAME has merge commits since upstream main." >&2
+            exit 1
+          fi
+
+          {
+            echo "### Fork commits applied onto $UPSTREAM_TAG"
+            git log --format='- %h %s' --reverse "$base..HEAD"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          git checkout --quiet --detach "refs/tags/$UPSTREAM_TAG"
+          if ! git cherry-pick --empty=drop "${commits[@]}"; then
+            {
+              echo "conflict_commit=$(git rev-parse --short CHERRY_PICK_HEAD 2>/dev/null || echo unknown)"
+              echo "conflict_files<<EOF"
+              git diff --name-only --diff-filter=U
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            git cherry-pick --abort || true
+            echo "::error::Fork commits do not apply cleanly onto $UPSTREAM_TAG."
+            exit 1
+          fi
+
+      - name: Report rebase conflict
+        if: failure() && steps.rebase.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          UPSTREAM_TAG: ${{ steps.resolve.outputs.upstream_tag }}
+          CONFLICT_COMMIT: ${{ steps.rebase.outputs.conflict_commit }}
+          CONFLICT_FILES: ${{ steps.rebase.outputs.conflict_files }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Fork release: fork commits conflict with upstream"
+          {
+            echo "Rebasing \`$GITHUB_REF_NAME\` onto upstream \`$UPSTREAM_TAG\` failed."
+            echo
+            echo "- Run: $RUN_URL"
+            echo "- Commit that did not apply: \`${CONFLICT_COMMIT:-unknown}\`"
+            echo "- Conflicted files:"
+            if [[ -n "${CONFLICT_FILES:-}" ]]; then
+              while IFS= read -r file; do
+                [[ -n "$file" ]] && echo "  - \`$file\`"
+              done <<< "$CONFLICT_FILES"
+            else
+              echo "  - (none recorded; see the run log)"
+            fi
+            echo
+            echo "Rebase \`$GITHUB_REF_NAME\` onto upstream by hand, push it, and rerun this workflow."
+          } > issue-body.md
+          number="$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\")) | first | .number // empty")"
+          if [[ -n "$number" ]]; then
+            gh issue comment "$number" --body-file issue-body.md
+          else
+            gh issue create --title "$title" --body-file issue-body.md
+          fi
+
+      # Clerk and relay ids come from .env.example, as upstream's preview builds
+      # do; this fork has no production relay configuration.
+      - id: public_config
+        name: Resolve T3 Connect public config
+        if: steps.resolve.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_example() { sed -n "s|^T3CODE_$1=||p" .env.example; }
+          clerk_publishable_key="$(env_example CLERK_PUBLISHABLE_KEY)"
+          clerk_jwt_template="$(env_example CLERK_JWT_TEMPLATE)"
+          clerk_cli_oauth_client_id="$(env_example CLERK_CLI_OAUTH_CLIENT_ID)"
+          relay_domain="$(sed -n 's|^T3CODE_RELAY_URL=https://||p' .env.example)"
+          for name in clerk_publishable_key clerk_jwt_template clerk_cli_oauth_client_id relay_domain; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing $name in .env.example." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "clerk_publishable_key=$clerk_publishable_key"
+            echo "clerk_jwt_template=$clerk_jwt_template"
+            echo "clerk_cli_oauth_client_id=$clerk_cli_oauth_client_id"
+            echo "relay_url=https://$relay_domain"
+          } >> "$GITHUB_OUTPUT"
+
+      # One parentless commit holding the rebased tree without the vendored
+      # .repos, which the build never checks out. It is all the build needs.
+      - id: source
+        name: Bundle fork source
+        if: steps.resolve.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          tree="$(git ls-tree HEAD | awk -F'\t' '$2 != ".repos"' | git mktree)"
+          snapshot="$(git commit-tree "$tree" -m "T3 Code v$VERSION fork build from $source_sha")"
+          git update-ref refs/heads/fork-build "$snapshot"
+          mkdir -p "$RUNNER_TEMP/fork-source"
+          git bundle create "$RUNNER_TEMP/fork-source/source.bundle" refs/heads/fork-build
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Upload fork source
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-source
+          path: ${{ runner.temp }}/fork-source/source.bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  # Mirrors release.yml's build_bundle: the platform-independent JS, built once
+  # and handed to both packaging jobs as `js-bundle`.
+  build_bundle:
+    name: Build JS bundle
+    needs: [prepare]
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.prepare.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.prepare.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.prepare.outputs.relay_url }}
+    steps:
+      - name: Download fork source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: fork-source
+          path: ${{ runner.temp }}/source-bundle
+
+      - name: Checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags "$RUNNER_TEMP/source-bundle/source.bundle" fork-build
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.prepare.outputs.version }}"
+
+      # Older release refs lack build:desktop:bundle and use the full build,
+      # which compiles the Linux browser secret helper and needs libsecret.
+      - name: Check bundle-only build support
+        id: bundle_build
+        run: |
+          script="$(node -p "require('./package.json').scripts['build:desktop:bundle'] ? 'build:desktop:bundle' : 'build:desktop'")"
+          echo "script=$script" >> "$GITHUB_OUTPUT"
+
+      - name: Install browser secret helper build libraries
+        if: steps.bundle_build.outputs.script == 'build:desktop'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run ${{ steps.bundle_build.outputs.script }}
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  # The Windows job embeds this job's CLI archive as its WSL runtime and finds
+  # it by this job's name ("... / Build Linux x64"), so keep the label.
+  desktop_linux_x64:
+    name: Desktop Linux x64
+    needs: [prepare, build_bundle]
+    if: needs.prepare.outputs.skip == 'false' && needs.build_bundle.result == 'success'
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      ref: fork-build
+      source_artifact: fork-source
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.prepare.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.prepare.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.prepare.outputs.relay_url }}
+      label: Linux x64
+      runner: ubuntu-24.04
+      platform: linux
+      target: AppImage
+      arch: x64
+      rust_target: x86_64-unknown-linux-gnu
+      resource_key: linux-x64
+      cli_archive: true
+
+  # Built on Linux like upstream's; only the native checks run on Windows.
+  # Unsigned: no Azure Trusted Signing secrets are passed.
+  desktop_win_x64:
+    name: Desktop Windows x64
+    needs: [prepare, build_bundle]
+    if: needs.prepare.outputs.skip == 'false' && needs.build_bundle.result == 'success'
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      ref: fork-build
+      source_artifact: fork-source
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.prepare.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.prepare.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.prepare.outputs.relay_url }}
+      label: Windows x64
+      runner: ubuntu-24.04
+      verify_runner: windows-2025
+      platform: win
+      target: nsis
+      arch: x64
+      rust_target: x86_64-pc-windows-msvc
+      resource_key: win32-x64
+      cli_archive: true
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, desktop_linux_x64, desktop_win_x64]
+    if: needs.prepare.outputs.skip == 'false' && needs.desktop_linux_x64.result == 'success' && needs.desktop_win_x64.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-win-x64
+          path: release-assets
+
+      - name: Download CLI archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: cli-*-x64
+          merge-multiple: true
+          path: release-assets
+
+      # The x64-only Windows feed needs no merge, only upstream's final name.
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          mv latest-win-x64.yml latest.yml
+          feed_version="$(sed -n "s/^version: *['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\} *$/\1/p" latest.yml)"
+          if [[ "$feed_version" != "$VERSION" ]]; then
+            echo "latest.yml does not describe version $VERSION:" >&2
+            cat latest.yml >&2
+            exit 1
+          fi
+          sha256sum "t3-$VERSION-linux-x64.tar.gz" "t3-$VERSION-win32-x64.zip" > SHA256SUMS
+          cat SHA256SUMS
+          assets=(
+            "T3-Code-$VERSION-x64.exe"
+            "T3-Code-$VERSION-x64.exe.blockmap"
+            latest.yml
+            "t3-$VERSION-linux-x64.tar.gz"
+            "t3-$VERSION-win32-x64.zip"
+            SHA256SUMS
+          )
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "Missing release asset $asset. Have:" >&2
+              ls -la >&2
+              exit 1
+            fi
+          done
+          printf 'release-assets/%s\n' "${assets[@]}" > ../release-files.txt
+
+      - name: Write release notes
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          {
+            if [[ -n "$UPSTREAM_TAG" ]]; then
+              echo "T3 Code [$UPSTREAM_TAG](https://github.com/$UPSTREAM_REPOSITORY/releases/tag/$UPSTREAM_TAG) with this fork's patches from \`$GITHUB_REF_NAME\` (\`${GITHUB_SHA:0:12}\`)."
+              echo
+              echo "Built from the rebased commit \`$SOURCE_SHA\`, which exists only in the build run."
+            else
+              echo "T3 Code fork build of \`$GITHUB_REF_NAME\` at \`$SOURCE_SHA\`, not rebased onto an upstream release."
+            fi
+            echo
+            echo "Unsigned Windows x64 installer and Linux x64 / Windows x64 CLI runtimes."
+          } > release-notes.md
+
+      # Created as a draft so no updater sees the release before every asset is
+      # attached, then published as the latest release. A draft left by a
+      # failed earlier attempt is replaced.
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == "true" ]]; then
+            gh release delete "$TAG" --yes
+          fi
+          mapfile -t files < release-files.txt
+          gh release create "$TAG" "${files[@]}" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "T3 Code $TAG" \
+            --notes-file release-notes.md
+          gh release edit "$TAG" --draft=false --prerelease=false --latest
